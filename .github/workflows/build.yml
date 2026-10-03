@@ -1,0 +1,29 @@
+name: build-glory
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone ReShade
+        run: git clone --recurse-submodules --depth 1 https://github.com/crosire/reshade.git reshade
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: microsoft/setup-msbuild@v2
+      - name: Apply Glory patch
+        run: python patch_glory.py reshade
+      - name: Build 64-bit
+        run: msbuild reshade/ReShade.sln /m /p:Configuration=Release /p:Platform=64-bit
+      - name: Build 32-bit
+        run: msbuild reshade/ReShade.sln /m /p:Configuration=Release /p:Platform=32-bit
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory out | Out-Null
+          Get-ChildItem reshade/bin -Recurse -Include ReShade*.dll | ForEach-Object { Copy-Item $_.FullName ("out/" + ($_.Name -replace '^ReShade','Glory')) }
+          Get-ChildItem out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Glory
+          path: out
