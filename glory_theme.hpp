@@ -47,7 +47,10 @@ namespace glory
 	inline void load_cfg()
 	{
 		g.cfg_loaded = true;
-		GetModuleFileNameA(nullptr, g.ini, MAX_PATH);
+		HMODULE self = nullptr;
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCSTR>(&glory::load_cfg), &self);
+		GetModuleFileNameA(self, g.ini, MAX_PATH);
 		char *slash = std::strrchr(g.ini, '\\');
 		if (slash) *(slash + 1) = '\0';
 		std::strcat(g.ini, "Glory.ini");
@@ -66,12 +69,22 @@ namespace glory
 	inline void apply_style()
 	{
 		if (!g.cfg_loaded) load_cfg();
-		if (!g.use_color) return;
-		const ImVec4 c(g.bg[0], g.bg[1], g.bg[2], 0.96f);
+		if (!g.use_color && !g.use_image) return;
 		ImGuiStyle &s = ImGui::GetStyle();
-		s.Colors[ImGuiCol_WindowBg] = c;
-		s.Colors[ImGuiCol_ChildBg] = ImVec4(c.x, c.y, c.z, 0.0f);
-		s.Colors[ImGuiCol_PopupBg] = c;
+		if (g.use_image && g.srv.handle)
+		{
+			// الخلفية (لون + صورة) ترسم خلف النافذة، فنخلي النافذة شفافة
+			s.Colors[ImGuiCol_WindowBg] = ImVec4(0, 0, 0, 0);
+			s.Colors[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+		}
+		else if (g.use_color)
+		{
+			const ImVec4 c(g.bg[0], g.bg[1], g.bg[2], 0.96f);
+			s.Colors[ImGuiCol_WindowBg] = c;
+			s.Colors[ImGuiCol_ChildBg] = ImVec4(c.x, c.y, c.z, 0.0f);
+		}
+		if (g.use_color)
+			s.Colors[ImGuiCol_PopupBg] = ImVec4(g.bg[0], g.bg[1], g.bg[2], 0.98f);
 	}
 
 	inline void unload_image()
@@ -134,8 +147,32 @@ namespace glory
 		g.browsing = false;
 	}
 
-	// يُستدعى قبل ImGui::Render
-	inline void draw_window(bool show, reshade::api::device *dev)
+	// محتوى تبويب Background (أو النافذة العائمة)
+	inline void draw_controls()
+	{
+		bool ch = false;
+		ImGui::TextUnformatted("Glory - Background");
+		ImGui::Separator();
+		ch |= ImGui::Checkbox("Use background color", &g.use_color);
+		ch |= ImGui::ColorEdit3("Background color", g.bg);
+		ImGui::Spacing();
+		ch |= ImGui::Checkbox("Use background image", &g.use_image);
+		ch |= ImGui::SliderFloat("Image opacity", &g.opacity, 0.05f, 1.0f);
+		ImGui::InputText("Image path", g.path, sizeof(g.path));
+		if (ImGui::Button(g.browsing ? "Browsing..." : "Browse...") && !g.browsing)
+		{
+			g.browsing = true;
+			std::thread(browse_thread, GetForegroundWindow()).detach();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Load image")) { g.reload = true; g.use_image = true; ch = true; }
+		ImGui::SameLine();
+		if (ImGui::Button("Remove image")) { g.use_image = false; g.path[0] = '\0'; unload_image(); ch = true; }
+		if (ch) save_cfg();
+	}
+
+	// يُستدعى كل فريم قبل ImGui::Render: تحميل الصورة + رسم الخلفية خلف نافذة القائمة
+	inline void frame(bool show, reshade::api::device *dev, bool floating)
 	{
 		g.dev = dev;
 		if (!g.cfg_loaded) load_cfg();
@@ -146,40 +183,38 @@ namespace glory
 		if (g.reload) { g.reload = false; if (!load_image(g.path)) g.use_image = false; }
 		if (!show) return;
 
-		// صورة الخلفية فوق نافذة القائمة الرئيسية بشفافية
-		if (g.use_image && g.srv.handle)
+		if (g.use_color || (g.use_image && g.srv.handle))
 		{
 			ImGuiContext &c = *ImGui::GetCurrentContext();
+			ImGuiWindow *best = nullptr; float best_area = 0.f;
 			for (ImGuiWindow *w : c.Windows)
 			{
-				if (!w->Active || w->Hidden || (w->Flags & ImGuiWindowFlags_ChildWindow) || w->Size.x < 300) continue;
+				if (!w->Active || w->Hidden || (w->Flags & ImGuiWindowFlags_ChildWindow) || w->Size.x < 300 || w->Size.y < 200) continue;
 				if (!std::strcmp(w->Name, "Glory Theme")) continue;
 				if (!std::strstr(w->Name, "Glory") && !std::strstr(w->Name, "ReShade")) continue;
-				w->DrawList->AddImage((ImTextureID)g.srv.handle, w->Pos, ImVec2(w->Pos.x + w->Size.x, w->Pos.y + w->Size.y),
-					ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, static_cast<int>(g.opacity * 255.f)));
-				break;
+				const float area = w->Size.x * w->Size.y;
+				if (area > best_area) { best = w; best_area = area; }
+			}
+			if (best)
+			{
+				ImDrawList *bg = ImGui::GetBackgroundDrawList();
+				const ImVec2 p0 = best->Pos, p1(best->Pos.x + best->Size.x, best->Pos.y + best->Size.y);
+				if (g.use_image && g.srv.handle)
+				{
+					if (g.use_color)
+						bg->AddRectFilled(p0, p1, ImGui::ColorConvertFloat4ToU32(ImVec4(g.bg[0], g.bg[1], g.bg[2], 1.0f)));
+					bg->AddImage((ImTextureID)g.srv.handle, p0, p1, ImVec2(0, 0), ImVec2(1, 1),
+						IM_COL32(255, 255, 255, static_cast<int>(g.opacity * 255.f)));
+				}
 			}
 		}
 
-		ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
-		if (ImGui::Begin("Glory Theme", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+		if (floating)
 		{
-			bool ch = false;
-			ch |= ImGui::Checkbox("Use background color", &g.use_color);
-			ch |= ImGui::ColorEdit3("Background color", g.bg);
-			ImGui::Separator();
-			ch |= ImGui::Checkbox("Use background image", &g.use_image);
-			ch |= ImGui::SliderFloat("Image opacity", &g.opacity, 0.05f, 1.0f);
-			ImGui::InputText("Image path", g.path, sizeof(g.path));
-			if (ImGui::Button(g.browsing ? "Browsing..." : "Browse...") && !g.browsing)
-			{
-				g.browsing = true;
-				std::thread(browse_thread, GetForegroundWindow()).detach();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Load image")) { g.reload = true; g.use_image = true; ch = true; }
-			if (ch) save_cfg();
+			ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
+			if (ImGui::Begin("Glory Theme", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+				draw_controls();
+			ImGui::End();
 		}
-		ImGui::End();
 	}
 }
