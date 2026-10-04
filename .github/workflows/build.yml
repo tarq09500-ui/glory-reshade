@@ -2,7 +2,7 @@ name: build-glory
 on: workflow_dispatch
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - name: Clone ReShade
@@ -15,13 +15,14 @@ jobs:
         run: python patch_glory.py reshade
       - name: Build 64-bit
         run: msbuild reshade/ReShade.sln /m /p:Configuration=Release /p:Platform=64-bit
-      - name: Build 32-bit
-        run: msbuild reshade/ReShade.sln /m /p:Configuration=Release /p:Platform=32-bit
       - name: Collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory out | Out-Null
-          Get-ChildItem reshade/bin -Recurse -Include ReShade*.dll | ForEach-Object { Copy-Item $_.FullName ("out/" + ($_.Name -replace '^ReShade','Glory')) }
+          $dll = Get-ChildItem reshade/bin -Recurse -Filter ReShade64.dll | Select-Object -First 1
+          if (-not $dll) { Get-ChildItem reshade/bin -Recurse | Select-Object -First 60 FullName; throw "ReShade64.dll not found" }
+          Copy-Item $dll.FullName out/Glory64.dll
+          Copy-Item $dll.FullName out/Glory64.asi
           Get-ChildItem out
       - uses: actions/upload-artifact@v4
         with:
