@@ -23,7 +23,10 @@ jobs:
           if (-not $dll) { Get-ChildItem reshade/bin -Recurse | Select-Object -First 60 FullName; throw "ReShade64.dll not found" }
           Copy-Item $dll.FullName out/Glory64.dll
           Copy-Item $dll.FullName out/Glory64.asi
-          Get-ChildItem out
+          Copy-Item Glory.ini out/Glory.ini
+          Copy-Item -Recurse glory-shaders out/glory-shaders
+          New-Item -ItemType Directory -Force out/glory-shaders/Textures | Out-Null
+          Get-ChildItem out -Recurse
       - uses: actions/upload-artifact@v4
         with:
           name: Glory
